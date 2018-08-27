@@ -1,4 +1,9 @@
-class QueryFieldsMixin(object):
+__all__ = [
+    'QueryFieldsMixin',
+    'SerpyQueryFieldsMixin',
+]
+
+class BaseFieldsMixin(object):
 
     # If using Django filters in the API, these labels mustn't conflict with any model field names.
     include_arg_name = 'fields'
@@ -9,39 +14,83 @@ class QueryFieldsMixin(object):
     delimiter = ','
 
     def __init__(self, *args, **kwargs):
-        super(QueryFieldsMixin, self).__init__(*args, **kwargs)
 
-        try:
-            request = self.context['request']
-            method = request.method
-        except (AttributeError, TypeError, KeyError):
-            # The serializer was not initialized with request context.
-            return
+        if not hasattr(self, '_fields_attribute'):
+            raise AttributeError("Derived classes must set the '_fields_attribute' class variable.")
+        super(BaseFieldsMixin, self).__init__(*args, **kwargs)
+        self._sieve_fieldset()
 
+    @property
+    def _fields(self):
+        """
+        Returns the fields attribute as specified in derived classes.
+        """
+        return getattr(self, self._fields_attribute)
+
+    def _get_request_method(self):
+        """
+        Returns the request method.
+        """
+        request = self.context['request']
+        method = request.method
         if method != 'GET':
-            return
+            raise AttributeError
+        return (request, method)
 
-        try:
-            query_params = request.query_params
-        except AttributeError:
-            # DRF 2
-            query_params = getattr(request, 'QUERY_PARAMS', request.GET)
+    def _get_query_params(self, request):
+        """
+        Returns the query parameters for the request if, and only if, the
+        request method is GET.
+        """
+        return getattr(request, 'query_params') or getattr(request, 'QUERY_PARAMS', request.GET)
 
-        includes = query_params.getlist(self.include_arg_name)
-        include_field_names = {name for names in includes for name in names.split(self.delimiter) if name}
+    def _get_fieldsets(self):
+        """
+        Returns the included and excluded field names.
+        """
+        _get_field_names = lambda fieldset: {
+            fname for fnames in fieldset for fname fnames.split(self.delimiter) if fname
+        }
+        included = _get_field_names(query_params.getlist(self.include_arg_name))
+        excluded = _get_field_names(query_params.getlist(self.exclude_arg_name))
+        return (included, excluded)
 
-        excludes = query_params.getlist(self.exclude_arg_name)
-        exclude_field_names = {name for names in excludes for name in names.split(self.delimiter) if name}
-
-        if not include_field_names and not exclude_field_names:
-            # No user fields filtering was requested, we have nothing to do here.
-            return
-
-        serializer_field_names = set(self.fields)
-
-        fields_to_drop = serializer_field_names & exclude_field_names
-        if include_field_names:
-            fields_to_drop |= serializer_field_names - include_field_names
-
+    def _drop_fields(self, included, excluded):
+        """
+        Drops the fields that are specified by the request, if necessary.
+        """
+        fields = self._fields
+        serializer_fields = set(fields)
+        fields_to_drop = serializer_fields & excluded
+        if included:
+            fields_to_drop |= serializer_fields - included
         for field in fields_to_drop:
-            self.fields.pop(field)
+            fields.pop(field)
+
+    def _sieve_fieldset(self):
+        """
+        Performs sieving of the serializers fieldset based upon the request, if necessary.
+        """
+        try:
+            request, method = self._get_request_method()
+            query_params = self._get_query_params(request)
+        except (AttributeError, TypeError, KeyError):
+            return
+        included, excluded = self._get_fieldsets()
+        if not (included or excluded):
+            return
+        self._drop_fields(included, excluded)
+
+class QueryFieldsMixin(BaseFieldsMixin):
+    """
+    Provides a mixin for dynamic fields on the Django Rest Frameworks
+    serializer instances.
+    """
+    _fields_attribute = 'fields'
+
+class SerpyQueryFieldsMixin(BaseFieldsMixin):
+    """
+    Provides a mixin for dynamic fields on serpy's implementation(s)
+    of serializtion in place of Django Rest Frameworks serializers.
+    """
+    _fields_attribute = '_compiled_fields'
